@@ -8,7 +8,10 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.io.Writer;
 import java.lang.annotation.Annotation;
+import java.lang.invoke.MethodHandles.Lookup;
+import java.lang.reflect.Constructor;
 import java.lang.reflect.InvocationHandler;
+import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.util.List;
 import java.util.Optional;
@@ -64,7 +67,7 @@ public class Parser<T> {
         @SuppressWarnings("unchecked") // newProxyInstance is guaranteed to return a T
         T model = (T) newProxyInstance(modelClass.getClassLoader(),
                                        new Class[] { modelClass },
-                                       new OptionsInvocationHandler(parser.parse(args)));
+                                       new OptionsInvocationHandler(modelClass, parser.parse(args)));
         return model;
     }
 
@@ -140,11 +143,28 @@ public class Parser<T> {
         }
     }
 
-    private static class OptionsInvocationHandler implements InvocationHandler {
-        final OptionSet options;
+    // hacks to deal with poor and inconsistent API
+    private static Lookup getLookup(Class<?> modelClass) {
+        try {
+            Constructor<Lookup> c = Lookup.class.getDeclaredConstructor(Class.class);
+            if (!c.isAccessible()) {
+                c.setAccessible(true);
+            }
+            return c.newInstance(modelClass);
+        } catch (NoSuchMethodException | InstantiationException | IllegalAccessException | InvocationTargetException e) {
+            throw new RuntimeException("failed to create Lookup with private access", e);
+        }
+    }
 
-        OptionsInvocationHandler(OptionSet options) {
+    private static class OptionsInvocationHandler implements InvocationHandler {
+        final Class<?> modelClass;
+        final OptionSet options;
+        final Lookup lookup;
+
+        OptionsInvocationHandler(Class<?> modelClass, OptionSet options) {
+            this.modelClass = modelClass;
             this.options = options;
+            lookup = getLookup(modelClass);
         }
 
         @Override // InvocationHandler
@@ -152,6 +172,16 @@ public class Parser<T> {
             String name = getOptionName(method);
             if (isOptionFlag(method)) {
                 return options.has(name);
+            }
+            if (!options.has(name) && method.isDefault()) {
+                try {
+                    return lookup
+                        .unreflectSpecial(method, modelClass)
+                        .bindTo(proxy)
+                        .invokeWithArguments(args);
+                } catch (Throwable e) {
+                    throw new RuntimeException("failed to invoke default method", e);
+                }
             }
             return options.valueOf(name);
         }
