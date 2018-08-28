@@ -3,9 +3,11 @@ package org.korz.joptsimple.annotations;
 import joptsimple.ArgumentAcceptingOptionSpec;
 import joptsimple.OptionParser;
 import joptsimple.OptionSet;
+import joptsimple.OptionException;
 
 import java.io.IOException;
 import java.io.OutputStream;
+import java.io.UncheckedIOException;
 import java.io.Writer;
 import java.lang.annotation.Annotation;
 import java.lang.invoke.MethodHandles.Lookup;
@@ -13,46 +15,133 @@ import java.lang.reflect.Constructor;
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Optional;
 
 import static java.lang.reflect.Proxy.newProxyInstance;
 
+/**
+ * Parses program arguments into a strongly typed model.
+ * @param <T> The arguments model type.
+ */
 public class Parser<T> {
-    public static <T> T parse(List<String> args, Class<T> modelClass) {
-        return new Parser<>(modelClass).parse(args);
+    /**
+     * Parses arguments into a strongly typed model.
+     * @param modelClass The arguments model class.
+     * @param args The arguments.
+     * @param <T> The arguments model type.
+     * @return The parsed arguments.
+     * @throws NullPointerException If modelClass or args are null.
+     * @throws IllegalArgumentException if modelClass is not an interface.
+     */
+    public static <T> T parse(Class<T> modelClass, List<String> args) {
+        return newParser(modelClass)
+            .build()
+            .parse(args);
     }
 
-    public static <T> T parse(String[] args, Class<T> modelClass) {
-        return new Parser<>(modelClass).parse(args);
-    }
-
+    /**
+     * Parses arguments into a strongly typed model.
+     * @param modelClass The arguments model class.
+     * @param args The arguments.
+     * @param <T> The arguments model type.
+     * @return The parsed arguments.
+     * @throws NullPointerException If modelClass or args are null.
+     * @throws IllegalArgumentException if modelClass is not an interface.
+     */
     public static <T> T parse(Class<T> modelClass, String... args) {
-        return parse(args, modelClass);
+        return newParser(modelClass)
+            .build()
+            .parse(args);
+    }
+
+    /**
+     * Creates a new builder for Parser instances.
+     * @param modelClass The arguments model class.
+     * @param <T> The arguments model type.
+     * @return A new builder.
+     * @throws NullPointerException If modelClass is null.
+     * @throws IllegalArgumentException if modelClass is not an interface.
+     */
+    public static <T> Builder<T> newParser(Class<T> modelClass) {
+        return new Builder<>(modelClass);
+    }
+
+    /**
+     * Constructs a new Parser instance.
+     * @param <T> The arguments model type.
+     */
+    public static class Builder<T> {
+        private final Class<T> modelClass;
+        private ParserCallbacks<T> parserCallbacks = new DefaultParserCallbacks<>();
+
+        private Builder(Class<T> modelClass) {
+            if (modelClass == null) {
+                throw new NullPointerException("modelClass is null");
+            }
+            if (!modelClass.isInterface()) {
+                throw new IllegalArgumentException("modelClass is not an interface: " + modelClass.getName());
+            }
+            this.modelClass = modelClass;
+        }
+
+        /**
+         * Sets the callbacks for the Parser instance.
+         * @param parserCallbacks The callbacks.
+         * @return This builder.
+         * @throws NullPointerException If parserCallbacks is null.
+         */
+        public Builder<T> withCallbacks(ParserCallbacks<T> parserCallbacks) {
+            if (parserCallbacks == null) {
+                throw new NullPointerException("parserCallbacks is null");
+            }
+            this.parserCallbacks = parserCallbacks;
+            return this;
+        }
+
+        /**
+         * Constructs a new Parser instance.
+         * @return A new Parser instance.
+         */
+        public Parser<T> build() {
+            return new Parser<>(this);
+        }
     }
 
     private final Class<T> modelClass;
     private final OptionParser parser;
+    private final String helpOption = "help";
+    private final ParserCallbacks<T> parserCallbacks;
 
-    public Parser(Class<T> modelClass) {
-        if (modelClass == null) {
-            throw new NullPointerException("modelClass is null");
+    private Parser(Builder<T> builder) {
+        modelClass = builder.modelClass;
+        parserCallbacks = builder.parserCallbacks;
+        parser = createParser(modelClass);
+    }
+
+    public void printHelp(Writer out) {
+        try {
+            parser.printHelpOn(out);
+        } catch (IOException e) {
+            throw new UncheckedIOException("printHelpOn failed", e);
         }
-        if (!modelClass.isInterface()) {
-            throw new IllegalArgumentException("modelClass is not an interface: " + modelClass.getName());
+    }
+
+    public void printHelp(OutputStream out) {
+        try {
+            parser.printHelpOn(out);
+        } catch (IOException e) {
+            throw new UncheckedIOException("printHelpOn failed", e);
         }
-        this.modelClass = modelClass;
-        parser = newParser(modelClass);
     }
 
-    public void printHelp(Writer out) throws IOException {
-        parser.printHelpOn(out);
-    }
-
-    public void printHelp(OutputStream out) throws IOException {
-        parser.printHelpOn(out);
-    }
-
+    /**
+     * Parses arguments into a strongly typed model.
+     * @param args The arguments.
+     * @return The parsed arguments.
+     * @throws NullPointerException If args is null.
+     */
     public T parse(List<String> args) {
         if (args == null) {
             throw new NullPointerException("args is null");
@@ -60,19 +149,37 @@ public class Parser<T> {
         return parse(args.toArray(new String[0]));
     }
 
+    /**
+     * Parses arguments into a strongly typed model.
+     * @param args The arguments.
+     * @return The parsed arguments.
+     * @throws NullPointerException If args is null.
+     * @throws IllegalArgumentException If the parser callback for unknown options does not terminate.
+     */
     public T parse(String... args) {
         if (args == null) {
             throw new NullPointerException("args is null");
         }
+        OptionSet optionSet;
+        try {
+            optionSet = parser.parse(args);
+        } catch (OptionException e) {
+            parserCallbacks.onError(this, e.getMessage());
+            throw new IllegalArgumentException("invalid arguments", e);
+        }
+        if (optionSet.has(helpOption)) {
+            parserCallbacks.onHelp(this);
+        }
         @SuppressWarnings("unchecked") // newProxyInstance is guaranteed to return a T
         T model = (T) newProxyInstance(modelClass.getClassLoader(),
                                        new Class[] { modelClass },
-                                       new OptionsInvocationHandler(modelClass, parser.parse(args)));
+                                       new OptionsInvocationHandler(modelClass, optionSet));
         return model;
     }
 
-    private static OptionParser newParser(Class<?> modelClass) {
+    private static OptionParser createParser(Class<?> modelClass) {
         OptionParser parser = new OptionParser();
+        boolean addDefaultHelp = true;
         for (Method method : modelClass.getMethods()) {
             String name = getOptionName(method);
             if (parser.recognizedOptions().containsKey(name)) {
@@ -94,6 +201,10 @@ public class Parser<T> {
                     optionSpec.defaultsTo(getDefaultValue(method.getReturnType()));
                 }
             }
+        }
+        if (addDefaultHelp) {
+            parser.accepts("help", "Show this help")
+                .forHelp();
         }
         return parser;
     }

@@ -17,7 +17,7 @@ public class DescriptionTest {
 
     @Test
     public void test() throws IOException {
-        Parser<Options> parser = new Parser<>(Options.class);
+        Parser<Options> parser = Parser.newParser(Options.class).build();
         StringWriter writer = new StringWriter();
         parser.printHelp(writer);
         String[] lines = writer.toString().split("\n");
